@@ -427,7 +427,7 @@
         <h2>DEEP SEA LAB // MISSION CONTROL</h2>
         <div class="hud-actions">
             <button class="hud-btn" onclick="document.body.classList.toggle('inclusive-font')">Easy Font</button>
-            <button class="hud-btn btn-teacher" onclick="checkTeacherPassword()">Teacher Desk ⚙️</button>
+            <button class="hud-btn btn-teacher" id="teacherDeskButton" onclick="checkTeacherPassword()">Teacher Desk ⚙️</button>
         </div>
     </header>
 
@@ -463,7 +463,8 @@
                         </select>
                     </div>
 
-                    <button class="action-btn" style="padding:14px; margin-top:10px;" onclick="startExpedition()">START MISSION 🌊</button>
+                    <div id="sharedLessonNotice" style="display:none; margin-top:4px; padding:10px; border:1px solid var(--success-neon); border-radius:8px; color:var(--success-neon); font-size:0.82rem;"></div>
+                    <button class="action-btn" id="startMissionButton" style="padding:14px; margin-top:10px;" onclick="startExpedition()">START MISSION 🌊</button>
                 </div>
             </div>
         </div>
@@ -617,7 +618,7 @@
             <div class="ai-generator-panel">
                 <div class="ai-panel-title">🤖 AI MISSION GENERATOR (Syllabus & Document Analyzer)</div>
                 <div style="font-size:0.8rem; color:#cbd5e1; margin-bottom:10px;">
-                    Paste curriculum objectives, vocabulary, lesson notes, or upload a PDF / book-page photo. No API key is required.
+                    Paste curriculum objectives, vocabulary, lesson notes, or upload a PDF / book-page photo. You can also paste a rough lesson draft from ChatGPT, Gemini, Claude, or another AI — no station-by-station formatting is required. No API key is required.
                 </div>
                 
                 <div style="display:flex; flex-direction:column; gap:10px;">
@@ -674,7 +675,10 @@
                 <button class="hud-btn" onclick="exportJSON()">Export Lesson Package (JSON)</button>
                 <input type="file" id="importJsonFile" accept=".json" style="display:none;" onchange="importJSON(event)">
                 <button class="hud-btn" onclick="document.getElementById('importJsonFile').click()">Import Lesson Package (JSON)</button>
+                <button class="hud-btn" style="border-color:var(--success-neon); color:var(--success-neon);" onclick="createStudentLink()">Create Student Link 🔗</button>
+                <button class="hud-btn" id="deleteSharedLessonBtn" style="border-color:#ff9f1c; color:#ff9f1c;" onclick="deleteLastSharedLesson()">Delete Last Shared Link 🗑️</button>
                 <button class="hud-btn" style="border-color:var(--danger-neon); color:var(--danger-neon);" onclick="resetToFactoryDefaults()">Reset to Factory Defaults ⚠️</button>
+                <div id="shareLessonResult" style="display:none; width:100%; padding:10px; border:1px solid rgba(0,245,212,0.35); border-radius:8px; background:#071226; color:#cbd5e1; font-size:0.78rem; word-break:break-all;"></div>
             </div>
 
             <div style="display:flex; justify-content:space-between; align-items:center; margin-top:25px; border-top:1px solid rgba(255,183,3,0.3); padding-top:15px;">
@@ -783,6 +787,9 @@
         };
 
         localStorage.removeItem('bathysphere_gemini_key');
+        let sharedLesson = null;
+        let activeSharedLessonId = '';
+        const SHARED_LESSON_TOKEN_KEY = 'bathysphere_shared_lesson_tokens_v1';
         let customEdited = (() => {
             try {
                 const parsed = JSON.parse(localStorage.getItem('bathysphere_cms_custom') || '{}');
@@ -801,6 +808,10 @@
 
         function getActiveStationData(id) {
             const def = defaultStations[id];
+            if (sharedLesson) {
+                const shared = sharedLesson[id] || sharedLesson[String(id)] || {};
+                return { ...def, ...shared };
+            }
             const cust = customEdited[id] || {};
             return { ...def, ...cust };
         }
@@ -2193,8 +2204,9 @@ function safeOcrLoadImage(dataUrl) {
         }
 
         function restartExpedition() {
-            document.getElementById('debriefScreen').style.display = 'none';
-            document.getElementById('briefingScreen').style.display = 'block';
+            // Reloading preserves the shared lesson URL (or the teacher's local lesson)
+            // while clearing all transient game state, inputs, switches, score and visited stations.
+            window.location.reload();
         }
 
         function moveFener(e) {
@@ -2692,9 +2704,183 @@ function safeOcrLoadImage(dataUrl) {
             jumpTo(id);
         }
 
+
+        function buildActiveLessonPackage() {
+            const full = {};
+            for (let i = 1; i <= 30; i++) full[i] = getActiveStationData(i);
+            return full;
+        }
+
+        function readSharedLessonTokens() {
+            try {
+                const parsed = JSON.parse(localStorage.getItem(SHARED_LESSON_TOKEN_KEY) || '{}');
+                return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {};
+            } catch { return {}; }
+        }
+
+        function saveSharedLessonToken(lessonId, deleteToken) {
+            const map = readSharedLessonTokens();
+            map[lessonId] = { deleteToken, createdAt: Date.now() };
+            const entries = Object.entries(map)
+                .sort((a, b) => Number(b[1]?.createdAt || 0) - Number(a[1]?.createdAt || 0))
+                .slice(0, 20);
+            localStorage.setItem(SHARED_LESSON_TOKEN_KEY, JSON.stringify(Object.fromEntries(entries)));
+            localStorage.setItem('bathysphere_last_shared_lesson_id', lessonId);
+        }
+
+        async function createStudentLink() {
+            if (!teacherSessionUnlocked) {
+                alert('🔒 Unlock Teacher Desk before creating a student link.');
+                return;
+            }
+            if (sharedLesson) {
+                alert('This browser is currently viewing a shared student lesson. Open the normal teacher page to create a new link.');
+                return;
+            }
+
+            const lesson = buildActiveLessonPackage();
+            const payload = JSON.stringify({ lesson });
+            const bytes = new TextEncoder().encode(payload).byteLength;
+            if (bytes > 6 * 1024 * 1024) {
+                alert('This lesson is larger than 6 MB. Reduce custom image/audio size before sharing.');
+                return;
+            }
+
+            const resultBox = document.getElementById('shareLessonResult');
+            resultBox.style.display = 'block';
+            resultBox.textContent = 'Creating secure lesson snapshot...';
+
+            try {
+                const response = await fetch(`${AI_WORKER_URL}lessons`, {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'X-Client-Id': DEEPSEA_ANON_CLIENT_ID
+                    },
+                    body: payload
+                });
+                const data = await response.json().catch(() => ({}));
+                if (!response.ok || data.success === false || !data.lessonId || !data.deleteToken) {
+                    throw new Error(data.error || `Sharing failed with HTTP ${response.status}.`);
+                }
+
+                saveSharedLessonToken(data.lessonId, data.deleteToken);
+                const studentUrl = new URL(window.location.href);
+                studentUrl.search = '';
+                studentUrl.searchParams.set('lesson', data.lessonId);
+                studentUrl.hash = '';
+
+                resultBox.textContent = `Student link: ${studentUrl.toString()}`;
+                try {
+                    await navigator.clipboard.writeText(studentUrl.toString());
+                    alert('✓ Student link created and copied. This is an immutable snapshot: later edits or Factory Reset will not change it.');
+                } catch {
+                    prompt('Student link created. Copy this link:', studentUrl.toString());
+                }
+            } catch (err) {
+                resultBox.textContent = `Sharing failed: ${err.message}`;
+                alert('Could not create student link: ' + err.message);
+            }
+        }
+
+        async function deleteLastSharedLesson() {
+            if (!teacherSessionUnlocked) {
+                alert('🔒 Unlock Teacher Desk first.');
+                return;
+            }
+            const lessonId = localStorage.getItem('bathysphere_last_shared_lesson_id') || '';
+            const map = readSharedLessonTokens();
+            const token = map[lessonId]?.deleteToken || '';
+            if (!lessonId || !token) {
+                alert('No locally remembered shared lesson is available to delete.');
+                return;
+            }
+            if (!confirm('Delete your most recently created shared lesson link? Students will no longer be able to reload that link.')) return;
+
+            try {
+                const response = await fetch(`${AI_WORKER_URL}lessons/${encodeURIComponent(lessonId)}`, {
+                    method: 'DELETE',
+                    headers: {
+                        'X-Client-Id': DEEPSEA_ANON_CLIENT_ID,
+                        'X-Lesson-Delete-Token': token
+                    }
+                });
+                const data = await response.json().catch(() => ({}));
+                if (!response.ok || data.success === false) throw new Error(data.error || `Delete failed with HTTP ${response.status}.`);
+                delete map[lessonId];
+                localStorage.setItem(SHARED_LESSON_TOKEN_KEY, JSON.stringify(map));
+                localStorage.removeItem('bathysphere_last_shared_lesson_id');
+                const resultBox = document.getElementById('shareLessonResult');
+                if (resultBox) {
+                    resultBox.style.display = 'block';
+                    resultBox.textContent = 'Shared lesson link deleted.';
+                }
+                alert('✓ Shared lesson deleted.');
+            } catch (err) {
+                alert('Could not delete shared lesson: ' + err.message);
+            }
+        }
+
+        async function loadSharedLessonFromUrl() {
+            const url = new URL(window.location.href);
+            const lessonId = (url.searchParams.get('lesson') || '').trim();
+            if (!lessonId) return;
+
+            const notice = document.getElementById('sharedLessonNotice');
+            const startButton = document.getElementById('startMissionButton');
+            if (!/^[A-Za-z0-9_-]{16,40}$/.test(lessonId)) {
+                notice.style.display = 'block';
+                notice.style.color = 'var(--danger-neon)';
+                notice.style.borderColor = 'var(--danger-neon)';
+                notice.textContent = 'This student lesson link is invalid.';
+                startButton.disabled = true;
+                return;
+            }
+
+            notice.style.display = 'block';
+            notice.textContent = 'Loading shared lesson...';
+            startButton.disabled = true;
+
+            try {
+                const response = await fetch(`${AI_WORKER_URL}lessons/${encodeURIComponent(lessonId)}`, {
+                    method: 'GET',
+                    headers: { 'X-Client-Id': DEEPSEA_ANON_CLIENT_ID }
+                });
+                const data = await response.json().catch(() => ({}));
+                if (!response.ok || data.success === false || !data.lesson) {
+                    throw new Error(data.error || `Lesson loading failed with HTTP ${response.status}.`);
+                }
+
+                const safe = {};
+                for (let id = 1; id <= 30; id++) {
+                    const station = sanitizeImportedStation(id, data.lesson[id] ?? data.lesson[String(id)]);
+                    if (!station) throw new Error(`Station ${id} is missing or unsafe.`);
+                    safe[id] = station;
+                }
+
+                sharedLesson = safe;
+                activeSharedLessonId = lessonId;
+                const teacherButton = document.getElementById('teacherDeskButton');
+                if (teacherButton) teacherButton.style.display = 'none';
+                const teacherDesk = document.getElementById('teacherDesk');
+                if (teacherDesk) teacherDesk.style.display = 'none';
+
+                notice.style.color = 'var(--success-neon)';
+                notice.style.borderColor = 'var(--success-neon)';
+                notice.textContent = '✓ Teacher lesson loaded. Your score and answers start fresh on this device. You can replay the same lesson after finishing.';
+                startButton.disabled = false;
+            } catch (err) {
+                sharedLesson = null;
+                activeSharedLessonId = '';
+                notice.style.color = 'var(--danger-neon)';
+                notice.style.borderColor = 'var(--danger-neon)';
+                notice.textContent = `Could not load this shared lesson: ${err.message}`;
+                startButton.disabled = true;
+            }
+        }
+
         function exportJSON() {
-            const fullExport = {};
-            for(let i=1; i<=30; i++) fullExport[i] = getActiveStationData(i);
+            const fullExport = buildActiveLessonPackage();
             const str = "data:text/json;charset=utf-8," + encodeURIComponent(JSON.stringify(fullExport, null, 2));
             const a = document.createElement('a');
             a.href = str; a.download = "bathysphere_lesson_package.json";
@@ -2776,6 +2962,10 @@ function safeOcrLoadImage(dataUrl) {
                 jumpTo(1); renderTeacherForm();
             }
         }
+
+        // Student links load as immutable lesson snapshots without touching the
+        // teacher's local CMS data or student analytics history.
+        loadSharedLessonFromUrl();
     </script>
 </body>
 </html>
