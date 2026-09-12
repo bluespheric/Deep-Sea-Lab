@@ -683,7 +683,10 @@
 
             <div style="display:flex; justify-content:space-between; align-items:center; margin-top:25px; border-top:1px solid rgba(255,183,3,0.3); padding-top:15px;">
                 <h3 style="color:var(--gold-glow);">📊 STUDENT ANALYTICS HISTORY & DIAGNOSTICS</h3>
-                <button class="hud-btn" style="border-color:var(--danger-neon); color:var(--danger-neon); padding:5px 10px;" onclick="clearAllStudentLogs()">Clear All Logs 🗑️</button>
+                <div style="display:flex; gap:8px; flex-wrap:wrap; justify-content:flex-end;">
+                    <button class="hud-btn" style="border-color:var(--success-neon); color:var(--success-neon); padding:5px 10px;" onclick="refreshSharedStudentLogs(true)">Refresh Shared Results ☁️</button>
+                    <button class="hud-btn" style="border-color:var(--danger-neon); color:var(--danger-neon); padding:5px 10px;" onclick="clearAllStudentLogs()">Clear Local Logs 🗑️</button>
+                </div>
             </div>
             <div style="overflow-x:auto;">
                 <table class="analytics-table" id="analyticsTable">
@@ -789,7 +792,9 @@
         localStorage.removeItem('bathysphere_gemini_key');
         let sharedLesson = null;
         let activeSharedLessonId = '';
-        const SHARED_LESSON_TOKEN_KEY = 'bathysphere_shared_lesson_tokens_v1';
+        const SHARED_LESSON_TOKEN_KEY = 'bathysphere_shared_lesson_tokens_v2';
+        let remoteStudentLogs = [];
+        let activeRunId = '';
         let customEdited = (() => {
             try {
                 const parsed = JSON.parse(localStorage.getItem('bathysphere_cms_custom') || '{}');
@@ -1768,6 +1773,9 @@ function safeOcrLoadImage(dataUrl) {
             pilot.score = 0;
             pilot.visited = [];
             pilot.mistakes = [];
+            activeRunId = (crypto && typeof crypto.randomUUID === 'function')
+                ? crypto.randomUUID()
+                : getAnonymousClientId();
 
             document.getElementById('hudPilot').innerText = pilot.name;
             document.getElementById('hudRole').innerText = pilot.role;
@@ -2150,11 +2158,11 @@ function safeOcrLoadImage(dataUrl) {
             document.getElementById('certificateContainer').style.display = 'none';
         }
 
-        function generateCertificate() {
+        async function generateCertificate() {
             pilot.postFeeling = document.getElementById('selectPostFeeling').value;
             pilot.keyTakeaway = document.getElementById('inputKeyTakeaway').value.trim() || "Completed all core stations.";
 
-            saveStudentLog();
+            await saveStudentLog();
 
             document.getElementById('certPilotName').innerText = pilot.name;
             document.getElementById('certRole').innerText = pilot.role;
@@ -2179,28 +2187,60 @@ function safeOcrLoadImage(dataUrl) {
             document.getElementById('certificateContainer').style.display = 'block';
         }
 
-        function saveStudentLog() {
+        async function saveStudentLog() {
             const today = new Date().toLocaleString('en-US');
-            let diagnostic = "";
+            let diagnostic = '';
             const totalIssues = pilot.mistakes.length;
 
-            if(pilot.score === 0) { diagnostic = "⚠️ Critical: Student scored 0 XP and completed mission without answers."; } 
-            else if(totalIssues === 0 && pilot.score >= 500) { diagnostic = "🏆 Excellent Performance: Completed all stations without any errors."; } 
+            if(pilot.score === 0) { diagnostic = '⚠️ Critical: Student scored 0 XP and completed mission without answers.'; }
+            else if(totalIssues === 0 && pilot.score >= 500) { diagnostic = '🏆 Excellent Performance: Completed all stations without any errors.'; }
             else { diagnostic = `⚠️ Growth Area: Errors recorded in ${totalIssues} stations. Review recommended.`; }
 
             const record = {
                 id: Date.now(),
                 date: today,
+                sortTime: Date.now(),
                 name: pilot.name,
                 role: pilot.role,
                 score: `${pilot.score} XP`,
-                mistakes: totalIssues > 0 ? pilot.mistakes.join(', ') : "None",
-                diagnostic: diagnostic
+                mistakes: totalIssues > 0 ? pilot.mistakes.join(', ') : 'None',
+                diagnostic: diagnostic,
+                source: 'local'
             };
 
             studentLogs.unshift(record);
             studentLogs = studentLogs.slice(0, 50);
             localStorage.setItem('bathysphere_student_logs', JSON.stringify(studentLogs));
+
+            if (activeSharedLessonId && activeRunId) {
+                const submissionKey = `bathysphere_submitted_${activeSharedLessonId}_${activeRunId}`;
+                if (!sessionStorage.getItem(submissionKey)) {
+                    try {
+                        const response = await fetch(`${AI_WORKER_URL}lessons/${encodeURIComponent(activeSharedLessonId)}/results`, {
+                            method: 'POST',
+                            headers: {
+                                'Content-Type': 'application/json',
+                                'X-Client-Id': DEEPSEA_ANON_CLIENT_ID
+                            },
+                            body: JSON.stringify({
+                                runId: activeRunId,
+                                nickname: pilot.name,
+                                role: pilot.role,
+                                score: pilot.score,
+                                mistakes: pilot.mistakes,
+                                postFeeling: pilot.postFeeling,
+                                keyTakeaway: pilot.keyTakeaway
+                            })
+                        });
+                        const data = await response.json().catch(() => ({}));
+                        if (!response.ok || data.success === false) throw new Error(data.error || `HTTP ${response.status}`);
+                        sessionStorage.setItem(submissionKey, '1');
+                    } catch (err) {
+                        console.warn('Shared student analytics could not be submitted:', err);
+                        alert('Your certificate is ready, but the teacher analytics upload did not complete. Your result is still saved on this device.');
+                    }
+                }
+            }
         }
 
         function restartExpedition() {
@@ -2363,14 +2403,22 @@ function safeOcrLoadImage(dataUrl) {
             populateStationDropdown();
             renderTeacherForm();
             renderAnalyticsTable();
+            refreshSharedStudentLogs(false);
+        }
+
+        function allVisibleStudentLogs() {
+            return [...remoteStudentLogs, ...studentLogs]
+                .sort((a, b) => Number(b.sortTime || 0) - Number(a.sortTime || 0));
         }
 
         function renderAnalyticsTable() {
             const table = document.getElementById('analyticsTable');
             table.innerHTML = `<tr><th>Date</th><th>Nickname</th><th>Role</th><th>Score</th><th>Incorrect/Missed Stations</th><th>Diagnostic Report</th><th>Action</th></tr>`;
-            studentLogs.forEach((log, index) => {
+            const logs = allVisibleStudentLogs();
+            logs.forEach((log) => {
                 const row = document.createElement('tr');
-                const values = [log.date, log.name, log.role, log.score, log.mistakes, log.diagnostic];
+                const sourceTag = log.source === 'shared' ? ' ☁️' : '';
+                const values = [log.date + sourceTag, log.name, log.role, log.score, log.mistakes, log.diagnostic];
                 values.forEach((value, cellIndex) => {
                     const td = document.createElement('td');
                     td.textContent = String(value ?? '');
@@ -2385,45 +2433,138 @@ function safeOcrLoadImage(dataUrl) {
                 const del = document.createElement('button');
                 del.className = 'del-log-btn';
                 del.textContent = 'Delete ❌';
-                del.addEventListener('click', () => deleteSingleLog(index));
+                del.addEventListener('click', () => {
+                    if (log.source === 'shared') deleteSharedStudentLog(log);
+                    else deleteLocalStudentLog(log.localId);
+                });
                 actionTd.appendChild(del);
                 row.appendChild(actionTd);
                 table.appendChild(row);
             });
         }
 
-        function deleteSingleLog(index) {
-            if(confirm("Delete this student log?")) {
-                studentLogs.splice(index, 1);
+        function deleteLocalStudentLog(localId) {
+            if(confirm('Delete this local student log?')) {
+                studentLogs = studentLogs.filter(x => x.id !== localId);
                 localStorage.setItem('bathysphere_student_logs', JSON.stringify(studentLogs));
                 renderAnalyticsTable();
             }
         }
 
+        async function deleteSharedStudentLog(log) {
+            if (!confirm('Delete this shared student result from cloud analytics?')) return;
+            const map = readSharedLessonTokens();
+            const manageToken = map[log.lessonId]?.manageToken || '';
+            if (!manageToken) {
+                alert('The management token for this shared lesson is not available on this teacher browser.');
+                return;
+            }
+            try {
+                const response = await fetch(`${AI_WORKER_URL}lessons/${encodeURIComponent(log.lessonId)}/results/${encodeURIComponent(log.runId)}`, {
+                    method: 'DELETE',
+                    headers: {
+                        'X-Client-Id': DEEPSEA_ANON_CLIENT_ID,
+                        'X-Lesson-Manage-Token': manageToken
+                    }
+                });
+                const data = await response.json().catch(() => ({}));
+                if (!response.ok || data.success === false) throw new Error(data.error || `Delete failed with HTTP ${response.status}.`);
+                remoteStudentLogs = remoteStudentLogs.filter(x => !(x.lessonId === log.lessonId && x.runId === log.runId));
+                renderAnalyticsTable();
+            } catch (err) {
+                alert('Could not delete shared result: ' + err.message);
+            }
+        }
+
         function clearAllStudentLogs() {
-            if(confirm("Permanently clear all student logs?")) {
+            if(confirm('Permanently clear student logs stored only on this teacher device? Shared cloud results will stay available.')) {
                 studentLogs = [];
                 localStorage.removeItem('bathysphere_student_logs');
                 renderAnalyticsTable();
-                alert("All logs cleared!");
+                alert('Local logs cleared.');
+            }
+        }
+
+        function sharedResultToTableLog(result) {
+            const mistakes = Array.isArray(result.mistakes) ? result.mistakes : [];
+            let diagnostic = '';
+            if (Number(result.score) === 0) diagnostic = '⚠️ Critical: Student scored 0 XP and completed mission without answers.';
+            else if (mistakes.length === 0 && Number(result.score) >= 500) diagnostic = '🏆 Excellent Performance: Completed all stations without any errors.';
+            else diagnostic = `⚠️ Growth Area: Errors recorded in ${mistakes.length} stations. Review recommended.`;
+            const t = Date.parse(result.submittedAt || '') || 0;
+            return {
+                source: 'shared',
+                lessonId: String(result.lessonId || ''),
+                runId: String(result.id || ''),
+                sortTime: t,
+                date: t ? new Date(t).toLocaleString('en-US') : 'Unknown',
+                name: String(result.nickname || 'Explorer'),
+                role: String(result.role || ''),
+                score: `${Number(result.score) || 0} XP`,
+                mistakes: mistakes.length ? mistakes.join(', ') : 'None',
+                diagnostic
+            };
+        }
+
+        async function refreshSharedStudentLogs(showMessage = false) {
+            if (!teacherSessionUnlocked) return;
+            const map = readSharedLessonTokens();
+            const entries = Object.entries(map).filter(([, info]) => info && info.manageToken);
+            if (!entries.length) {
+                remoteStudentLogs = [];
+                renderAnalyticsTable();
+                if (showMessage) alert('No shared lessons created by this teacher browser are available yet.');
+                return;
+            }
+            const collected = [];
+            let failed = 0;
+            for (const [lessonId, info] of entries.slice(0, 20)) {
+                try {
+                    const response = await fetch(`${AI_WORKER_URL}lessons/${encodeURIComponent(lessonId)}/results`, {
+                        method: 'GET',
+                        headers: {
+                            'X-Client-Id': DEEPSEA_ANON_CLIENT_ID,
+                            'X-Lesson-Manage-Token': info.manageToken
+                        }
+                    });
+                    const data = await response.json().catch(() => ({}));
+                    if (!response.ok || data.success === false) throw new Error(data.error || `HTTP ${response.status}`);
+                    (data.results || []).forEach(r => collected.push(sharedResultToTableLog(r)));
+                } catch (err) {
+                    failed++;
+                    console.warn(`Shared analytics refresh failed for ${lessonId}:`, err);
+                }
+            }
+            const seen = new Set();
+            remoteStudentLogs = collected.filter(log => {
+                const key = `${log.lessonId}:${log.runId}`;
+                if (seen.has(key)) return false;
+                seen.add(key);
+                return true;
+            });
+            renderAnalyticsTable();
+            if (showMessage) {
+                if (failed) alert(`Shared results refreshed. ${failed} lesson link(s) could not be read.`);
+                else alert(`✓ Shared results refreshed. ${remoteStudentLogs.length} cloud result(s) loaded.`);
             }
         }
 
         function exportStudentLogsCSV() {
-            if(studentLogs.length === 0) { alert("No student data recorded yet."); return; }
+            const logs = allVisibleStudentLogs();
+            if(logs.length === 0) { alert('No student data recorded yet.'); return; }
             const csvCell = (value) => {
                 let s = String(value ?? '').replace(/\r?\n/g, ' ');
                 if (/^[=+\-@]/.test(s)) s = "'" + s;
                 return `"${s.replace(/"/g, '""')}"`;
             };
-            let csv = "Date,Nickname,Role,Score,Incorrect Stations,Diagnostic Report\n";
-            studentLogs.forEach(l => {
-                csv += [l.date, l.name, l.role, l.score, l.mistakes, l.diagnostic].map(csvCell).join(',') + "\n";
+            let csv = 'Date,Nickname,Role,Score,Incorrect Stations,Diagnostic Report,Source\n';
+            logs.forEach(l => {
+                csv += [l.date, l.name, l.role, l.score, l.mistakes, l.diagnostic, l.source === 'shared' ? 'Shared link' : 'Local device'].map(csvCell).join(',') + '\n';
             });
             const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
             const url = URL.createObjectURL(blob);
             const a = document.createElement('a');
-            a.href = url; a.download = "student_analytics_report.csv";
+            a.href = url; a.download = 'student_analytics_report.csv';
             document.body.appendChild(a); a.click(); a.remove();
             URL.revokeObjectURL(url);
         }
@@ -2750,9 +2891,9 @@ function safeOcrLoadImage(dataUrl) {
             } catch { return {}; }
         }
 
-        function saveSharedLessonToken(lessonId, deleteToken) {
+        function saveSharedLessonToken(lessonId, deleteToken, manageToken) {
             const map = readSharedLessonTokens();
-            map[lessonId] = { deleteToken, createdAt: Date.now() };
+            map[lessonId] = { deleteToken, manageToken, createdAt: Date.now() };
             const entries = Object.entries(map)
                 .sort((a, b) => Number(b[1]?.createdAt || 0) - Number(a[1]?.createdAt || 0))
                 .slice(0, 20);
@@ -2793,11 +2934,11 @@ function safeOcrLoadImage(dataUrl) {
                     body: payload
                 });
                 const data = await response.json().catch(() => ({}));
-                if (!response.ok || data.success === false || !data.lessonId || !data.deleteToken) {
+                if (!response.ok || data.success === false || !data.lessonId || !data.deleteToken || !data.manageToken) {
                     throw new Error(data.error || `Sharing failed with HTTP ${response.status}.`);
                 }
 
-                saveSharedLessonToken(data.lessonId, data.deleteToken);
+                saveSharedLessonToken(data.lessonId, data.deleteToken, data.manageToken);
                 const studentUrl = new URL(window.location.href);
                 studentUrl.search = '';
                 studentUrl.searchParams.set('lesson', data.lessonId);
@@ -2997,7 +3138,7 @@ function safeOcrLoadImage(dataUrl) {
         }
 
         // Student links load as immutable lesson snapshots without touching the
-        // teacher's local CMS data or student analytics history.
+        // teacher's local CMS data. Shared-student results are uploaded separately after completion.
         loadSharedLessonFromUrl();
     </script>
 </body>
