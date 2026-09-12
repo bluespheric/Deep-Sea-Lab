@@ -660,7 +660,7 @@
             <div style="margin-top:15px; display: flex; gap: 10px; align-items: center; justify-content: space-between;">
                 <div style="flex-grow: 1;">
                     <label style="font-size:0.85rem; color:var(--cyan-glow); font-weight:bold;">SELECT STATION TO EDIT (CMS):</label>
-                    <select id="admStationSelect" style="width:100%; padding:10px; background:#0d1e38; color:#fff; border:1px solid var(--border-hud); border-radius:6px; margin-top:5px;" onchange="renderTeacherForm()"></select>
+                    <select id="admStationSelect" style="width:100%; padding:10px; background:#0d1e38; color:#fff; border:1px solid var(--border-hud); border-radius:6px; margin-top:5px;" onchange="handleTeacherStationChange()"></select>
                 </div>
                 <div style="margin-top: 22px;">
                     <button class="hud-btn" style="border-color:var(--gold-glow); color:var(--gold-glow);" onclick="changeMasterPassword()">Change Password 🔑</button>
@@ -670,7 +670,7 @@
             <div id="teacherDynamicFields" class="teacher-form-section"></div>
 
             <div class="teacher-actions">
-                <button class="action-btn" onclick="saveCurrentStation()">Save & Deploy Station 💾</button>
+                <button class="action-btn" onclick="saveCurrentStation()">Save All Lesson Changes 💾</button>
                 <button class="hud-btn" style="border-color:#ff9f1c; color:#ff9f1c;" onclick="clearCurrentFormInputs()">Clear Fields (Blank Template) 🧹</button>
                 <button class="hud-btn" onclick="exportJSON()">Export Lesson Package (JSON)</button>
                 <input type="file" id="importJsonFile" accept=".json" style="display:none;" onchange="importJSON(event)">
@@ -2445,6 +2445,7 @@ function safeOcrLoadImage(dataUrl) {
 
         function renderTeacherForm() {
             const id = document.getElementById('admStationSelect').value;
+            lastTeacherStationId = id;
             const def = defaultStations[id];
             const cust = customEdited[id] || {};
             const container = document.getElementById('teacherDynamicFields');
@@ -2520,7 +2521,7 @@ function safeOcrLoadImage(dataUrl) {
                         🎙️ Regenerate Audio from Transcript
                     </button>
                     <div style="font-size:0.72rem; color:#64748b;">
-                        Edit the transcript above first, then regenerate. Click Save & Deploy Station afterward.
+                        Edit the transcript above first, then regenerate. Your changes are auto-saved when you switch stations; use Save All Lesson Changes for the current station.
                     </div>
                 `;
                 container.appendChild(audioGrp);
@@ -2608,11 +2609,16 @@ function safeOcrLoadImage(dataUrl) {
             alert("Fields cleared!");
         }
 
-        function saveCurrentStation() {
-            const id = document.getElementById('admStationSelect').value;
+        let lastTeacherStationId = null;
+
+        function collectCurrentStationData(id) {
             const def = defaultStations[id];
+            if (!def) return null;
             const data = {};
-            const promptVal = document.getElementById('adm_prompt').value.trim();
+            const promptEl = document.getElementById('adm_prompt');
+            if (!promptEl) return null;
+
+            const promptVal = promptEl.value.trim();
             if(promptVal) data.prompt = promptVal;
             if(tempImg) data.customImg = tempImg;
             if(tempAudio) data.customAudio = tempAudio;
@@ -2697,11 +2703,37 @@ function safeOcrLoadImage(dataUrl) {
                 if(t) data.title = t;
                 if(ds) data.desc = ds;
             }
+            return data;
+        }
 
+        function persistTeacherStation(id) {
+            const data = collectCurrentStationData(id);
+            if (!data) return false;
             customEdited[id] = data;
             localStorage.setItem('bathysphere_cms_custom', JSON.stringify(customEdited));
-            alert(`Station ${id} successfully updated!`);
-            jumpTo(id);
+            return true;
+        }
+
+        function handleTeacherStationChange() {
+            const sel = document.getElementById('admStationSelect');
+            const nextId = sel.value;
+            if (lastTeacherStationId && String(lastTeacherStationId) !== String(nextId)) {
+                persistTeacherStation(lastTeacherStationId);
+            }
+            renderTeacherForm();
+            lastTeacherStationId = nextId;
+        }
+
+        function saveCurrentStation(options = {}) {
+            const id = document.getElementById('admStationSelect').value;
+            const ok = persistTeacherStation(id);
+            if (!ok) return false;
+            lastTeacherStationId = id;
+            if (!options.silent) {
+                alert('✓ All lesson changes saved. Previous stations were auto-saved when you moved between them.');
+                jumpTo(id);
+            }
+            return true;
         }
 
 
@@ -2738,6 +2770,7 @@ function safeOcrLoadImage(dataUrl) {
                 return;
             }
 
+            saveCurrentStation({ silent: true });
             const lesson = buildActiveLessonPackage();
             const payload = JSON.stringify({ lesson });
             const bytes = new TextEncoder().encode(payload).byteLength;
